@@ -47,8 +47,9 @@ st.markdown(
 # Header Utama
 st.title("🛡️ Network Intrusion Detection System (NIDS) Security Center")
 st.markdown(
-    "Dashboard Pemantauan & Analisis Keamanan Jaringan Real-Time Berbasis"
-    " *Machine Learning* (**Random Forest** - Dataset **CICIDS2017**)."
+    "Dashboard analisis keamanan jaringan berbasis *Machine Learning*"
+    " (**Random Forest** - Dataset **CICIDS2017**). Memproses data trafik"
+    " yang diunggah dalam bentuk file CSV."
 )
 st.markdown("---")
 
@@ -82,9 +83,7 @@ if uploaded_file is not None:
 
   # Tombol Aksi Utama
   if st.button("🚀 Jalankan Analisis & Deteksi", type="primary"):
-    with st.spinner(
-        "Model sedang mengekstrak fitur dan memproses inferensi..."
-    ):
+    with st.spinner("Model sedang memproses inferensi data..."):
       X_infer = df_test.select_dtypes(include=[np.number])
       preds = model.predict(X_infer)
       df_test["Hasil_Prediksi"] = preds
@@ -163,7 +162,7 @@ if uploaded_file is not None:
 
     st.markdown("---")
 
-    # 3. FITUR TAMBAHAN BARU: Filter Berdasarkan Kategori Serangan
+    # 3. Filter Berdasarkan Kategori Serangan
     st.subheader("🔍 Filter & Eksplorasi Berdasarkan Kategori Trafik")
     unique_labels = df_res["Hasil_Prediksi"].unique().tolist()
     selected_filter = st.selectbox(
@@ -205,7 +204,7 @@ else:
         1. Siapkan file CSV pengujian jaringan dataset CICIDS2017.
         2. Masukkan file melalui tombol **Browse files** di panel *sidebar* kiri.
         3. Klik tombol utama **🚀 Jalankan Analisis & Deteksi**.
-        4. Amati **Badge Level Risiko**, kartu metrik eksekutif, dan grafik distribusi serangan secara interaktif.
-        5. Gunakan fitur **Filter Kategori Trafik** baru untuk memperlihatkan detail serangan spesifik di depan dosen penguji.
-        6. Unduh laporan hasil audit dalam format CSV sebagai bukti luaran sistem.
+        4. Amati **Badge Level Risiko**, kartu metrik eksekutif, dan grafik distribusi serangan.
+        5. Gunakan fitur **Filter Kategori Trafik** untuk melihat detail jenis trafik tertentu.
+        6. Unduh laporan hasil audit dalam format CSV.
         """)
