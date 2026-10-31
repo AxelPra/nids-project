@@ -200,7 +200,7 @@ else:
       " sebelah kiri untuk memulai audit keamanan."
   )
 
-  with st.expander("📖 Panduan Singkat Penggunaan Dashboard (Untuk Demo Sempro)"):
+  with st.expander("📖 Panduan Singkat Penggunaan Dashboard"):
     st.markdown("""
         1. Siapkan file CSV pengujian jaringan dataset CICIDS2017.
         2. Masukkan file melalui tombol **Browse files** di panel *sidebar* kiri.
