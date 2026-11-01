@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# Batas baris untuk laporan lengkap (semua kolom). Di atas ini, laporan hanya berisi hasil prediksi.
+MAX_LAPORAN_LENGKAP = 200_000
+
 # Konfigurasi Halaman
 st.set_page_config(
     page_title="NIDS Security Operations Dashboard",
@@ -64,6 +67,7 @@ try:
   model = load_model()
   model_status = "Aktif & Stabil (Akurasi: 99.87%)"
 except Exception as e:
+  model = None
   model_status = f"Error: {e}"
 
 # Sidebar untuk Navigasi & Upload
@@ -78,19 +82,45 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 if uploaded_file is not None:
-  with st.spinner("Membaca file data jaringan..."):
-    df_test = pd.read_csv(uploaded_file)
-
-  # Tombol Aksi Utama
+  # File hanya dibaca SEKALI, saat tombol diklik (bukan di setiap rerun)
   if st.button("🚀 Jalankan Analisis & Deteksi", type="primary"):
-    with st.spinner("Model sedang memproses inferensi data..."):
-      X_infer = df_test.select_dtypes(include=[np.number])
-      preds = model.predict(X_infer)
-      df_test["Hasil_Prediksi"] = preds
+    if model is None:
+      st.error("Model gagal dimuat, analisis tidak dapat dijalankan.")
+    else:
+      # Hapus hasil lama agar memori tidak menumpuk
+      for key in ["df_result", "preds", "csv_result", "report_label", "report_name"]:
+        st.session_state.pop(key, None)
 
-      st.session_state["df_result"] = df_test
-      st.session_state["preds"] = preds
-      st.success("Analisis keamanan selesai!")
+      with st.spinner("Model sedang memproses inferensi data..."):
+        df_test = pd.read_csv(uploaded_file)
+
+        # Perkecil memori: float64 -> float32
+        num_cols = df_test.select_dtypes(include=[np.number]).columns
+        df_test[num_cols] = df_test[num_cols].astype("float32")
+
+        preds = model.predict(df_test[num_cols])
+        df_test["Hasil_Prediksi"] = pd.Categorical(preds)
+
+        # Buat file laporan SEKALI saja
+        if len(df_test) <= MAX_LAPORAN_LENGKAP:
+          csv_bytes = df_test.to_csv(index=False).encode("utf-8")
+          report_label = "Download Laporan Lengkap (.CSV)"
+          report_name = "laporan_audit_keamanan_nids.csv"
+        else:
+          csv_bytes = (
+              df_test[["Hasil_Prediksi"]]
+              .to_csv(index_label="no_baris")
+              .encode("utf-8")
+          )
+          report_label = "Download Hasil Prediksi (.CSV)"
+          report_name = "hasil_prediksi_nids.csv"
+
+        st.session_state["df_result"] = df_test
+        st.session_state["preds"] = preds
+        st.session_state["csv_result"] = csv_bytes
+        st.session_state["report_label"] = report_label
+        st.session_state["report_name"] = report_name
+        st.success("Analisis keamanan selesai!")
 
   # Jika sudah ada hasil prediksi
   if "df_result" in st.session_state:
@@ -158,13 +188,13 @@ if uploaded_file is not None:
 
     with col_table:
       st.write("**Rekapitulasi Kategori:**")
-      st.dataframe(counts, use_container_width=True)
+      st.dataframe(counts, width="stretch")
 
     st.markdown("---")
 
     # 3. Filter Berdasarkan Kategori Serangan
     st.subheader("🔍 Filter & Eksplorasi Berdasarkan Kategori Trafik")
-    unique_labels = df_res["Hasil_Prediksi"].unique().tolist()
+    unique_labels = [str(x) for x in df_res["Hasil_Prediksi"].unique()]
     selected_filter = st.selectbox(
         "Pilih kategori trafik yang ingin ditampilkan:",
         options=["Semua Kategori"] + unique_labels,
@@ -175,10 +205,10 @@ if uploaded_file is not None:
     else:
       df_filtered = df_res[df_res["Hasil_Prediksi"] == selected_filter]
 
-    st.dataframe(df_filtered.head(100), use_container_width=True)
+    st.dataframe(df_filtered.head(100), width="stretch")
     st.caption(
-        f"Menampilkan {len(df_filtered):,} baris data untuk kategori:"
-        f" **{selected_filter}**"
+        f"Menampilkan 100 baris pertama dari {len(df_filtered):,} baris data"
+        f" untuk kategori: **{selected_filter}**"
     )
 
     # 4. Tombol Download Laporan CSV
@@ -186,13 +216,17 @@ if uploaded_file is not None:
     with crypto_col1:
       st.markdown("---")
       st.subheader("📥 Ekspor Laporan")
-      csv_result = df_res.to_csv(index=False).encode("utf-8")
       st.download_button(
-          label="Download Laporan Lengkap (.CSV)",
-          data=csv_result,
-          file_name="laporan_audit_keamanan_nids.csv",
+          label=st.session_state["report_label"],
+          data=st.session_state["csv_result"],
+          file_name=st.session_state["report_name"],
           mime="text/csv",
       )
+      if total_data > MAX_LAPORAN_LENGKAP:
+        st.caption(
+            f"Data lebih dari {MAX_LAPORAN_LENGKAP:,} baris, sehingga laporan"
+            " hanya berisi hasil prediksi per baris."
+        )
 else:
   st.info(
       "👈 Silakan *upload* file CSV sampel data jaringan melalui panel di"
