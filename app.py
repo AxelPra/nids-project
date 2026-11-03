@@ -115,16 +115,31 @@ st.markdown(
     /* ---------- Kartu angka ---------- */
     .kartu {
         background: #ffffff; border: 1px solid #e6eaf2; border-radius: 16px;
-        padding: 16px 18px; display: flex; gap: 14px; align-items: center;
-        box-shadow: 0 4px 14px rgba(15, 27, 77, 0.06); height: 100%;
+        padding: 14px 16px; display: flex; gap: 12px; align-items: center;
+        box-shadow: 0 4px 14px rgba(15, 27, 77, 0.06);
+        height: 118px; box-sizing: border-box; overflow: hidden;
+        container-type: inline-size;
     }
+    .kartu .isi { flex: 1 1 auto; min-width: 0; }
     .kartu .ikon {
-        width: 48px; height: 48px; border-radius: 14px; flex: 0 0 auto;
-        display: flex; align-items: center; justify-content: center; font-size: 22px;
+        width: 44px; height: 44px; border-radius: 12px; flex: 0 0 auto;
+        display: flex; align-items: center; justify-content: center; font-size: 20px;
     }
-    .kartu .lbl { color: #636e72; font-size: 0.8rem; font-weight: 600; }
-    .kartu .val { color: #1e272e; font-size: 1.7rem; font-weight: 800; line-height: 1.15; }
-    .kartu .cat { color: #8395a7; font-size: 0.75rem; }
+    .kartu .cat { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .kartu .lbl {
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
+    @container (max-width: 150px) {
+        .kartu .ikon { display: none; }
+        .kartu .val { font-size: clamp(0.95rem, calc(100cqw / 6), 1.65rem); }
+    }
+    .kartu .lbl { color: #636e72; font-size: 0.78rem; font-weight: 600; line-height: 1.3; }
+    .kartu .val {
+        color: #1e272e; font-weight: 800; line-height: 1.2; white-space: nowrap;
+        font-size: clamp(1rem, calc((100cqw - 70px) / 5.6), 1.65rem);
+    }
+    .kartu .cat { color: #8395a7; font-size: 0.74rem; line-height: 1.3; }
     .kartu.netral .ikon { background: #e8edff; }
     .kartu.normal .ikon { background: #e3f9ec; }
     .kartu.bahaya .ikon { background: #ffe5e0; }
@@ -346,7 +361,7 @@ def fmt_id(n):
 
 def kartu(ikon, label, nilai, tone, catatan=""):
     return (
-        f'<div class="kartu {tone}"><div class="ikon">{ikon}</div><div>'
+        f'<div class="kartu {tone}"><div class="ikon">{ikon}</div><div class="isi">'
         f'<div class="lbl">{label}</div><div class="val">{nilai}</div>'
         f'<div class="cat">{catatan}</div></div></div>'
     )
@@ -402,8 +417,8 @@ def grafik_donat(n_normal, n_serangan):
         {"Jenis": ["Normal", "Serangan"], "Jumlah": [n_normal, n_serangan]}
     )
     arc = (
-        alt.Chart(data, title="Komposisi trafik")
-        .mark_arc(innerRadius=62, outerRadius=96, cornerRadius=4)
+        alt.Chart(data)
+        .mark_arc(innerRadius=48, outerRadius=76, cornerRadius=4)
         .encode(
             theta=alt.Theta("Jumlah:Q"),
             color=alt.Color(
@@ -418,10 +433,10 @@ def grafik_donat(n_normal, n_serangan):
     )
     teks = (
         alt.Chart(pd.DataFrame({"t": [f"{pct:.1f}%"]}))
-        .mark_text(fontSize=26, fontWeight="bold", color="#1e272e")
-        .encode(text="t:N", x=alt.value(120), y=alt.value(120))
+        .mark_text(fontSize=22, fontWeight="bold", color="#1e272e")
+        .encode(text="t:N", x=alt.value(90), y=alt.value(90))
     )
-    return (arc + teks).properties(width=240, height=240)
+    return (arc + teks).properties(width=180, height=180)
 
 
 # ============================================================================
@@ -853,8 +868,9 @@ with tab_hasil:
 
         st.subheader("📈 Komposisi dan Jenis Serangan")
         with st.container(border=True, key="panel_grafik"):
-            g1, g2 = st.columns([1, 2])
+            g1, g2 = st.columns([2, 3])
             with g1:
+                st.markdown("**Komposisi trafik**")
                 tampil(grafik_donat(total - n_serangan, n_serangan), stretch=False)
                 st.caption("🟢 Normal  ·  🔴 Serangan")
             with g2:
