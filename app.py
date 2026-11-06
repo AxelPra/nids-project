@@ -1,6 +1,9 @@
 import gc
 import io
 import os
+import re
+import sqlite3
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 import altair as alt
@@ -27,6 +30,9 @@ NORMAL = "Normal Traffic"
 MAX_LAPORAN_LENGKAP = 200_000  # di atas ini, CSV hanya berisi kolom hasil
 MAX_SERANGAN_LENGKAP = 50_000  # batas baris daftar serangan dengan semua kolom
 MAX_BARIS_EXCEL = 20_000  # batas baris pada sheet Detail_Serangan
+MAX_SQL_LENGKAP = 50_000  # di atas ini, tabel SQL hanya berisi kolom hasil
+MAX_SQL_DUMP = 100_000  # batas baris agar file .sql (teks) tidak terlalu besar
+MAX_BARIS_KUERI = 1_000  # baris maksimum yang ditampilkan dari satu kueri
 AMBANG_KEYAKINAN = 0.70  # keyakinan di bawah ini ditandai "perlu ditinjau"
 WIB = timezone(timedelta(hours=7))
 
@@ -599,6 +605,135 @@ def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom
 # ============================================================================
 # PROSES ANALISIS
 # ============================================================================
+# ============================================================================
+# FUNGSI BANTU: DATABASE SQL (SQLite)
+# ============================================================================
+KOLOM_HASIL = ["Hasil_Prediksi", "Keyakinan_%", "Perlu_Ditinjau", "Label_Asli"]
+
+CONTOH_KUERI = {
+    "Jumlah baris per kategori": (
+        "SELECT Hasil_Prediksi AS kategori, COUNT(*) AS jumlah\n"
+        "FROM hasil_prediksi\nGROUP BY Hasil_Prediksi\nORDER BY jumlah DESC"
+    ),
+    "Rata-rata keyakinan per kategori": (
+        "SELECT Hasil_Prediksi AS kategori,\n"
+        "       ROUND(AVG(Keyakinan_persen), 2) AS rata_rata_keyakinan\n"
+        "FROM hasil_prediksi\nGROUP BY Hasil_Prediksi\nORDER BY rata_rata_keyakinan"
+    ),
+    "Serangan dengan keyakinan rendah": (
+        "SELECT no_baris, Hasil_Prediksi, Keyakinan_persen\n"
+        "FROM hasil_prediksi\n"
+        "WHERE Hasil_Prediksi <> 'Normal Traffic' AND Perlu_Ditinjau = 1\n"
+        "ORDER BY Keyakinan_persen ASC\nLIMIT 100"
+    ),
+    "Ringkasan analisis": "SELECT * FROM info_analisis",
+    "Tabel ringkasan kategori": "SELECT * FROM ringkasan_kategori",
+}
+
+
+def _nama_sql(nama):
+    nama = str(nama).replace("%", "persen")
+    nama = re.sub(r"[^0-9A-Za-z]+", "_", nama).strip("_")
+    return nama or "kolom"
+
+
+def _nama_sql_unik(daftar):
+    terpakai, hasil = {}, []
+    for nama in map(_nama_sql, daftar):
+        terpakai[nama] = terpakai.get(nama, 0) + 1
+        hasil.append(nama if terpakai[nama] == 1 else f"{nama}_{terpakai[nama]}")
+    return hasil
+
+
+def buat_database_sql(h):
+    """Bangun database SQLite dari hasil analisis.
+
+    Mengembalikan dict berisi path file .db, bytes .db, teks dump .sql (atau None)
+    dan jumlah baris tabel utama.
+    """
+    out = h["out"]
+    if len(out) <= MAX_SQL_LENGKAP:
+        kolom = [k for k in h["kolom_urut"] if k in out.columns]
+    else:
+        kolom = [k for k in KOLOM_HASIL if k in out.columns]
+    df = out[kolom].copy()
+    for k in df.columns:
+        if str(df[k].dtype) == "category":
+            df[k] = df[k].astype(str)
+    if "Perlu_Ditinjau" in df.columns:
+        df["Perlu_Ditinjau"] = df["Perlu_Ditinjau"].astype(int)
+    df.columns = _nama_sql_unik(df.columns)
+
+    counts = h["counts"]
+    ringkasan = pd.DataFrame(
+        {
+            "kategori": counts.index.astype(str),
+            "jumlah": counts.values.astype(int),
+            "persen": (counts.values / max(h["total"], 1) * 100).round(3),
+        }
+    )
+    info = pd.DataFrame(
+        {
+            "sumber_data": [h["nama"]],
+            "waktu_analisis": [h["waktu"]],
+            "total_baris": [int(h["total"])],
+            "jumlah_serangan": [int(h["n_serangan"])],
+            "perlu_ditinjau": [int(h["n_ditinjau"])],
+            "akurasi": [h["evaluasi"]["akurasi"] if h["evaluasi"] else None],
+            "kolom_lengkap": [int(len(out) <= MAX_SQL_LENGKAP)],
+        }
+    )
+
+    fd, path = tempfile.mkstemp(suffix=".db", prefix="nids_")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    try:
+        df.to_sql(
+            "hasil_prediksi", conn, index=True, index_label="no_baris", chunksize=50_000
+        )
+        ringkasan.to_sql("ringkasan_kategori", conn, index=False)
+        info.to_sql("info_analisis", conn, index=False)
+        if h["evaluasi"]:
+            ev = h["evaluasi"]["tabel"].reset_index()
+            ev.columns = _nama_sql_unik(["kelas"] + list(ev.columns[1:]))
+            ev.to_sql("evaluasi_kelas", conn, index=False)
+        conn.execute(
+            "CREATE INDEX idx_hasil_prediksi ON hasil_prediksi(Hasil_Prediksi)"
+        )
+        conn.commit()
+        dump = None
+        if len(df) <= MAX_SQL_DUMP:
+            dump = "\n".join(conn.iterdump()) + "\n"
+    finally:
+        conn.close()
+    with open(path, "rb") as f:
+        data_db = f.read()
+    return {
+        "path": path,
+        "db": data_db,
+        "dump": dump.encode("utf-8") if dump else None,
+        "baris": int(len(df)),
+        "lengkap": len(out) <= MAX_SQL_LENGKAP,
+    }
+
+
+def jalankan_kueri(path, sql):
+    """Jalankan satu kueri baca-saja. Mengembalikan (DataFrame, terpotong)."""
+    teks = sql.strip().rstrip(";").strip()
+    if not teks.lower().startswith(("select", "with")):
+        raise ValueError("Hanya kueri SELECT (atau WITH ... SELECT) yang diizinkan.")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        cur = conn.execute(teks)
+        kolom = [d[0] for d in cur.description]
+        baris = cur.fetchmany(MAX_BARIS_KUERI + 1)
+    finally:
+        conn.close()
+    terpotong = len(baris) > MAX_BARIS_KUERI
+    return pd.DataFrame(baris[:MAX_BARIS_KUERI], columns=kolom), terpotong
+
+
 def analisis(sumber, nama):
     """Baca file SEKALI, prediksi, lalu simpan semua hasil ke session_state."""
     st.session_state.pop("hasil", None)
@@ -707,6 +842,7 @@ def analisis(sumber, nama):
         out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom_depan
     )
 
+    st.session_state.pop("sql", None)  # database SQL dibuat ulang untuk data baru
     st.session_state["hasil"] = {
         "out": out,
         "nama": nama,
@@ -773,8 +909,14 @@ hasil = st.session_state.get("hasil")
 # ============================================================================
 # KONTEN UTAMA (TAB)
 # ============================================================================
-tab_hasil, tab_eval, tab_model, tab_laporan = st.tabs(
-    ["📊 Hasil Analisis", "🎯 Evaluasi Langsung", "🧠 Performa Model", "📥 Laporan"]
+tab_hasil, tab_eval, tab_model, tab_laporan, tab_sql = st.tabs(
+    [
+        "📊 Hasil Analisis",
+        "🎯 Evaluasi Langsung",
+        "🧠 Performa Model",
+        "📥 Laporan",
+        "🗄️ Database SQL",
+    ]
 )
 
 # ---------------------------------------------------------------- Hasil Analisis
@@ -1057,3 +1199,87 @@ with tab_laporan:
             "Laporan Excel berisi sheet Ringkasan (dengan grafik), Detail_Serangan,"
             " dan, jika file berlabel, sheet Evaluasi serta Confusion_Matrix."
         )
+
+
+# ------------------------------------------------------------------ Database SQL
+with tab_sql:
+    st.subheader("🗄️ Database SQL")
+    if hasil is None:
+        st.info("Belum ada hasil analisis. Jalankan analisis terlebih dahulu.")
+    else:
+        st.caption(
+            "Simpan hasil prediksi sebagai database SQLite (.db) atau skrip SQL (.sql),"
+            " atau langsung jalankan kueri SQL di sini."
+        )
+        if "sql" not in st.session_state:
+            if st.button("🛠️ Buat database SQL dari hasil ini", type="primary", key="btn_sql"):
+                with st.spinner("Membuat database..."):
+                    st.session_state["sql"] = buat_database_sql(hasil)
+                st.rerun()
+        sql_state = st.session_state.get("sql")
+        if sql_state is not None and not os.path.exists(sql_state["path"]):
+            st.session_state.pop("sql", None)
+            sql_state = None
+            st.warning("Database sementara hilang. Silakan buat ulang.")
+        if sql_state is not None:
+            q1, q2 = st.columns(2)
+            with q1:
+                with st.container(border=True, key="panel_dl_db"):
+                    st.markdown("#### 🗃️ File Database (.db)")
+                    st.caption("Bisa dibuka di DB Browser for SQLite atau DBeaver.")
+                    st.download_button(
+                        "Unduh database (.db)",
+                        data=sql_state["db"],
+                        file_name="nids_hasil.db",
+                        mime="application/x-sqlite3",
+                        key="dl_db",
+                        width="stretch",
+                    )
+            with q2:
+                with st.container(border=True, key="panel_dl_sqlscript"):
+                    st.markdown("#### 📜 Skrip SQL (.sql)")
+                    st.caption("Berisi CREATE TABLE + INSERT, bisa diimpor ke MySQL/PostgreSQL.")
+                    if sql_state["dump"] is not None:
+                        st.download_button(
+                            "Unduh skrip (.sql)",
+                            data=sql_state["dump"],
+                            file_name="nids_hasil.sql",
+                            mime="application/sql",
+                            key="dl_sqlscript",
+                            width="stretch",
+                        )
+                    else:
+                        st.caption(
+                            f"Tidak tersedia: data lebih dari {MAX_SQL_DUMP:,} baris."
+                            " Gunakan file .db."
+                        )
+            if not sql_state["lengkap"]:
+                st.caption(
+                    f"Data lebih dari {MAX_SQL_LENGKAP:,} baris, sehingga tabel"
+                    " hasil_prediksi hanya berisi kolom hasil (prediksi, keyakinan,"
+                    " penanda tinjau, label asli)."
+                )
+            st.markdown(
+                "**Tabel:** `hasil_prediksi`, `ringkasan_kategori`, `info_analisis`"
+                + (", `evaluasi_kelas`" if hasil["evaluasi"] else "")
+            )
+
+            st.markdown("##### ▶️ Jalankan kueri SQL")
+            pilihan = st.selectbox("Contoh kueri", list(CONTOH_KUERI), key="contoh_kueri")
+            teks_sql = st.text_area(
+                "Kueri (hanya SELECT)",
+                value=CONTOH_KUERI[pilihan],
+                height=140,
+                key=f"teks_sql_{pilihan}",
+            )
+            if st.button("Jalankan", key="btn_jalankan_sql"):
+                try:
+                    df_kueri, terpotong = jalankan_kueri(sql_state["path"], teks_sql)
+                except Exception as e:
+                    st.error(f"Kueri gagal: {e}")
+                else:
+                    st.dataframe(df_kueri, hide_index=True, width="stretch")
+                    st.caption(
+                        f"{len(df_kueri):,} baris ditampilkan"
+                        + (f" (dibatasi {MAX_BARIS_KUERI:,} baris pertama)." if terpotong else ".")
+                    )
