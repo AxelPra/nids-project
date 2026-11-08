@@ -13,17 +13,11 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics import accuracy_score, classification_report
 
-# --- INTEGRASI DATABASE CLOUD (SQL & NoSQL) ---
+# --- INTEGRASI DATABASE CLOUD (Supabase / PostgreSQL) ---
 try:
     from supabase import create_client
 except Exception:
     create_client = None
-try:
-    import firebase_admin
-    from firebase_admin import credentials, db
-except Exception:
-    firebase_admin = None
-
 try:
     import xlsxwriter  # noqa: F401
 
@@ -78,35 +72,20 @@ METRIK_MODEL = pd.DataFrame(
 )
 
 # ============================================================================
-# INISIALISASI DATABASE CLOUD
+# INISIALISASI DATABASE CLOUD (SUPABASE)
 # ============================================================================
 # 1. Supabase (SQL)
 supabase_client = None
+supabase_galat = None
 try:
     if create_client is None:
         raise RuntimeError("pustaka supabase belum ada di requirements.txt")
     supabase_client = create_client(
         st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"]
     )
-except Exception:
+except Exception as e:
     supabase_client = None
-
-# 2. Firebase Realtime Database (NoSQL)
-firebase_ok = False
-try:
-    if firebase_admin is None:
-        raise RuntimeError("pustaka firebase-admin belum ada")
-    if not firebase_admin._apps:
-        if "FIREBASE_CREDENTIALS" in st.secrets:
-            cred = credentials.Certificate(dict(st.secrets["FIREBASE_CREDENTIALS"]))
-        else:
-            cred = credentials.Certificate("firebase_credentials.json")
-        firebase_admin.initialize_app(
-            cred, {"databaseURL": st.secrets["FIREBASE_URL"]}
-        )
-    firebase_ok = True
-except Exception:
-    firebase_ok = False
+    supabase_galat = f"{type(e).__name__}: {e}"
 
 # ============================================================================
 # TAMPILAN
@@ -679,7 +658,7 @@ def buat_excel(
 
 
 # ============================================================================
-# FUNGSI BANTU: DATABASE PENGIRIMAN CLOUD (SQL & NoSQL)
+# FUNGSI BANTU: DATABASE CLOUD (SUPABASE)
 # ============================================================================
 def kirim_ke_supabase(df_hasil):
     """Kirim log prediksi ke PostgreSQL Supabase (SQL)"""
@@ -705,25 +684,6 @@ def kirim_ke_supabase(df_hasil):
         st.toast("✅ Log berhasil dikirim ke Supabase (SQL)!")
     except Exception as e:
         st.warning(f"Koneksi Supabase: {e}")
-
-
-def kirim_ke_firebase(counts, total, n_serangan, n_ditinjau):
-    """Kirim ringkasan real-time ke Firebase (NoSQL)"""
-    if not firebase_ok:
-        return
-    try:
-        ref = db.reference("nids_summary")
-        summary_data = {
-            "waktu_analisis": datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S"),
-            "total_data": int(total),
-            "total_serangan": int(n_serangan),
-            "perlu_ditinjau": int(n_ditinjau),
-            "distribusi_kategori": counts.to_dict(),
-        }
-        ref.set(summary_data)
-        st.toast("⚡ Summary berhasil di-push ke Firebase Realtime DB (NoSQL)!")
-    except Exception as e:
-        st.warning(f"Koneksi Firebase: {e}")
 
 
 # ============================================================================
@@ -973,9 +933,8 @@ def analisis(sumber, nama):
         out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom_depan
     )
 
-    # === OTOMATIS SIMPAN KE SUPABASE (SQL) & FIREBASE (NoSQL) ===
+    # === OTOMATIS SIMPAN LOG KE SUPABASE (SQL) ===
     kirim_ke_supabase(out)
-    kirim_ke_firebase(counts, total, n_serangan, n_ditinjau)
 
     st.session_state.pop("sql", None)
     st.session_state["hasil"] = {
@@ -1006,6 +965,11 @@ st.sidebar.header("⚙️ Kontrol Panel")
 st.sidebar.info(
     f"**Status Model:**\nAlgoritma: Random Forest\nStatus: {model_status}"
 )
+
+if supabase_client is None:
+    st.sidebar.warning(f"Supabase belum terhubung. Penyebab: {supabase_galat}")
+else:
+    st.sidebar.success("Supabase terhubung")
 
 st.sidebar.header("📂 Sumber Data")
 uploaded_file = st.sidebar.file_uploader(
