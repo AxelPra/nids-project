@@ -660,30 +660,83 @@ def buat_excel(
 # ============================================================================
 # FUNGSI BANTU: DATABASE CLOUD (SUPABASE)
 # ============================================================================
-def kirim_ke_supabase(df_hasil):
-    """Kirim log prediksi ke PostgreSQL Supabase (SQL)"""
+MAX_LOG_SUPABASE = 1000  # baris pertama yang disimpan sebagai log per analisis
+
+
+def simpan_ke_supabase(h):
+    """Simpan satu analisis: 1 baris ringkasan (analisis_run) + sampel baris log.
+
+    Mengembalikan (run_id, jumlah_baris_log).
+    """
     if supabase_client is None:
-        st.warning(
-            "Supabase belum terhubung: cek Secrets (SUPABASE_URL dan SUPABASE_KEY)."
+        raise RuntimeError("Supabase belum terhubung.")
+    ev = h["evaluasi"]
+    run = (
+        supabase_client.table("analisis_run")
+        .insert(
+            {
+                "sumber_data": str(h["nama"]),
+                "waktu_analisis": h["waktu"],
+                "total_baris": int(h["total"]),
+                "jumlah_serangan": int(h["n_serangan"]),
+                "perlu_ditinjau": int(h["n_ditinjau"]),
+                "akurasi": float(ev["akurasi"]) if ev else None,
+                "distribusi": {str(k): int(v) for k, v in h["counts"].items()},
+            }
         )
-        return
+        .execute()
+    )
+    run_id = int(run.data[0]["id"])
     try:
-        data_to_push = []
-        # Ambil sampel 1.000 baris pertama untuk di-push ke database SQL Cloud
-        df_sample = df_hasil.head(1000)
-        for idx, row in df_sample.iterrows():
-            data_to_push.append(
-                {
-                    "no_baris": int(idx + 1),
-                    "Hasil_Prediksi": str(row["Hasil_Prediksi"]),
-                    "Keyakinan_Persen": float(row["Keyakinan_%"]),
-                    "Perlu_Ditinjau": bool(row["Perlu_Ditinjau"]),
-                }
+        sampel = h["out"].head(MAX_LOG_SUPABASE)
+        baris = [
+            {
+                "run_id": run_id,
+                "no_baris": int(n) + 1,
+                "Hasil_Prediksi": str(p),
+                "Keyakinan_Persen": float(k),
+                "Perlu_Ditinjau": bool(t),
+            }
+            for n, p, k, t in zip(
+                sampel.index.tolist(),
+                sampel["Hasil_Prediksi"].astype(str).tolist(),
+                sampel["Keyakinan_%"].astype(float).tolist(),
+                sampel["Perlu_Ditinjau"].astype(bool).tolist(),
             )
-        supabase_client.table("log_serangan").insert(data_to_push).execute()
-        st.toast("✅ Log berhasil dikirim ke Supabase (SQL)!")
-    except Exception as e:
-        st.warning(f"Koneksi Supabase: {e}")
+        ]
+        for a in range(0, len(baris), 500):
+            supabase_client.table("log_serangan").insert(baris[a : a + 500]).execute()
+    except Exception:
+        # batalkan ringkasan agar tidak ada riwayat yang setengah jadi
+        try:
+            supabase_client.table("analisis_run").delete().eq("id", run_id).execute()
+        except Exception:
+            pass
+        raise
+    return run_id, len(baris)
+
+
+def baca_riwayat(batas=50):
+    r = (
+        supabase_client.table("analisis_run")
+        .select("*")
+        .order("id", desc=True)
+        .limit(batas)
+        .execute()
+    )
+    return pd.DataFrame(r.data)
+
+
+def baca_log(run_id, batas=100):
+    r = (
+        supabase_client.table("log_serangan")
+        .select("no_baris,Hasil_Prediksi,Keyakinan_Persen,Perlu_Ditinjau")
+        .eq("run_id", int(run_id))
+        .order("no_baris")
+        .limit(batas)
+        .execute()
+    )
+    return pd.DataFrame(r.data)
 
 
 # ============================================================================
@@ -933,10 +986,9 @@ def analisis(sumber, nama):
         out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom_depan
     )
 
-    # === OTOMATIS SIMPAN LOG KE SUPABASE (SQL) ===
-    kirim_ke_supabase(out)
 
     st.session_state.pop("sql", None)
+    st.session_state.pop("run_tersimpan", None)
     st.session_state["hasil"] = {
         "out": out,
         "nama": nama,
@@ -1010,13 +1062,14 @@ hasil = st.session_state.get("hasil")
 # ============================================================================
 # KONTEN UTAMA (TAB)
 # ============================================================================
-tab_hasil, tab_eval, tab_model, tab_laporan, tab_sql = st.tabs(
+tab_hasil, tab_eval, tab_model, tab_laporan, tab_sql, tab_riwayat = st.tabs(
     [
         "📊 Hasil Analisis",
         "🎯 Evaluasi Langsung",
         "🧠 Performa Model",
         "📥 Laporan",
         "🗄️ Database SQL",
+        "🕘 Riwayat",
     ]
 )
 
@@ -1402,13 +1455,43 @@ with tab_laporan:
 # ------------------------------------------------------------------ Database SQL
 with tab_sql:
     st.subheader("🗄️ Database SQL (Lokal & Cloud)")
+    st.markdown("#### ☁️ Simpan ke Supabase (PostgreSQL)")
+    if supabase_client is None:
+        st.info("Supabase belum terhubung. Lihat penyebabnya di status sidebar.")
+    elif hasil is None:
+        st.caption("Jalankan analisis dulu, lalu simpan hasilnya ke database di sini.")
+    else:
+        tersimpan = st.session_state.get("run_tersimpan")
+        if tersimpan:
+            st.success(
+                f"Hasil ini sudah tersimpan sebagai **analisis #{tersimpan['id']}**"
+                f" ({tersimpan['n']:,} baris log). Lihat di tab Riwayat."
+            )
+        else:
+            st.caption(
+                "Menyimpan ringkasan analisis (nama file, waktu, jumlah, distribusi"
+                f" kategori) dan {MAX_LOG_SUPABASE:,} baris pertama sebagai log."
+            )
+            if st.button(
+                "💾 Simpan hasil ini ke Supabase",
+                type="primary",
+                key="btn_simpan_supabase",
+            ):
+                try:
+                    with st.spinner("Menyimpan ke Supabase..."):
+                        rid, n_log = simpan_ke_supabase(hasil)
+                    st.session_state["run_tersimpan"] = {"id": rid, "n": n_log}
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal menyimpan: {e}")
+    st.divider()
+    st.markdown("#### 💾 Ekspor file database (lokal)")
     if hasil is None:
         st.info("Belum ada hasil analisis. Jalankan analisis terlebih dahulu.")
     else:
         st.caption(
             "Simpan hasil prediksi sebagai database SQLite (.db) lokal, atau"
-            " jalankan kueri SQL langsung. Hasil analisis juga otomatis"
-            " tersimpan ke database SQL Cloud Supabase."
+            " jalankan kueri SQL langsung."
         )
         if "sql" not in st.session_state:
             if st.button(
@@ -1498,3 +1581,96 @@ with tab_sql:
                             else "."
                         )
                     )
+
+
+# ---------------------------------------------------------------------- Riwayat
+with tab_riwayat:
+    st.subheader("🕘 Riwayat Analisis (Supabase)")
+    if supabase_client is None:
+        st.info("Supabase belum terhubung. Lihat penyebabnya di status sidebar.")
+    else:
+        try:
+            riwayat = baca_riwayat()
+        except Exception as e:
+            riwayat = None
+            st.error(f"Gagal membaca riwayat: {e}")
+        if riwayat is not None and riwayat.empty:
+            st.info(
+                "Belum ada analisis yang tersimpan. Jalankan analisis, lalu klik"
+                " **Simpan hasil ini ke Supabase** di tab Database SQL."
+            )
+        elif riwayat is not None:
+            nama_kol = {
+                "id": "ID",
+                "sumber_data": "Sumber data",
+                "waktu_analisis": "Waktu",
+                "total_baris": "Total baris",
+                "jumlah_serangan": "Serangan",
+                "perlu_ditinjau": "Perlu ditinjau",
+                "akurasi": "Akurasi",
+            }
+            kol = [c for c in nama_kol if c in riwayat.columns]
+            tabel_r = riwayat[kol].rename(columns=nama_kol)
+            if "Akurasi" in tabel_r.columns:
+                tabel_r["Akurasi"] = (tabel_r["Akurasi"] * 100).round(2)
+            st.dataframe(
+                tabel_r,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Akurasi": st.column_config.NumberColumn(format="%.2f%%")
+                },
+            )
+            pilih = st.selectbox(
+                "Lihat detail analisis",
+                list(riwayat["id"]),
+                format_func=lambda i: f"#{i}",
+                key="pilih_riwayat",
+            )
+            baris = riwayat[riwayat["id"] == pilih].iloc[0]
+            jml = int(baris.get("total_baris") or 0)
+            ser = int(baris.get("jumlah_serangan") or 0)
+            tin = int(baris.get("perlu_ditinjau") or 0)
+            st.caption(
+                f"Sumber data: **{baris.get('sumber_data', '-')}** · dianalisis"
+                f" {baris.get('waktu_analisis', '-')}"
+            )
+            r1, r2, r3 = st.columns(3)
+            r1.markdown(
+                kartu("📁", "Total data", fmt_id(jml), "netral", "baris"),
+                unsafe_allow_html=True,
+            )
+            r2.markdown(
+                kartu(
+                    "🔴",
+                    "Serangan terdeteksi",
+                    fmt_id(ser),
+                    "bahaya",
+                    f"{(ser / jml * 100) if jml else 0:.2f}% dari total",
+                ),
+                unsafe_allow_html=True,
+            )
+            r3.markdown(
+                kartu("🟡", "Perlu ditinjau", fmt_id(tin), "waspada", "keyakinan rendah"),
+                unsafe_allow_html=True,
+            )
+            st.write("")
+            dist = baris.get("distribusi")
+            if isinstance(dist, dict) and dist:
+                with st.container(border=True, key="panel_riwayat_dist"):
+                    seri = pd.Series(dist).sort_values(ascending=False)
+                    tampil(
+                        grafik_batang(
+                            seri,
+                            f"Analisis #{pilih}: jumlah baris per kategori",
+                            horizontal=True,
+                        )
+                    )
+            try:
+                log = baca_log(pilih)
+            except Exception as e:
+                log = None
+                st.error(f"Gagal membaca log: {e}")
+            if log is not None and not log.empty:
+                st.markdown("**Contoh baris log (100 pertama)**")
+                st.dataframe(log, hide_index=True, width="stretch")
