@@ -13,6 +13,17 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics import accuracy_score, classification_report
 
+# --- INTEGRASI DATABASE CLOUD (SQL & NoSQL) ---
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
+try:
+    import firebase_admin
+    from firebase_admin import credentials, db
+except Exception:
+    firebase_admin = None
+
 try:
     import xlsxwriter  # noqa: F401
 
@@ -65,6 +76,37 @@ METRIK_MODEL = pd.DataFrame(
         "Jumlah Data Uji": [389, 1830, 25603, 38749, 419012, 18139, 429],
     }
 )
+
+# ============================================================================
+# INISIALISASI DATABASE CLOUD
+# ============================================================================
+# 1. Supabase (SQL)
+supabase_client = None
+try:
+    if create_client is None:
+        raise RuntimeError("pustaka supabase belum ada di requirements.txt")
+    supabase_client = create_client(
+        st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"]
+    )
+except Exception:
+    supabase_client = None
+
+# 2. Firebase Realtime Database (NoSQL)
+firebase_ok = False
+try:
+    if firebase_admin is None:
+        raise RuntimeError("pustaka firebase-admin belum ada")
+    if not firebase_admin._apps:
+        if "FIREBASE_CREDENTIALS" in st.secrets:
+            cred = credentials.Certificate(dict(st.secrets["FIREBASE_CREDENTIALS"]))
+        else:
+            cred = credentials.Certificate("firebase_credentials.json")
+        firebase_admin.initialize_app(
+            cred, {"databaseURL": st.secrets["FIREBASE_URL"]}
+        )
+    firebase_ok = True
+except Exception:
+    firebase_ok = False
 
 # ============================================================================
 # TAMPILAN
@@ -408,7 +450,9 @@ def rapikan(chart):
             titleColor="#57606f",
             labelFontSize=12,
         )
-        .configure_title(anchor="start", fontSize=15, fontWeight=600, color="#1e272e", offset=12)
+        .configure_title(
+            anchor="start", fontSize=15, fontWeight=600, color="#1e272e", offset=12
+        )
     )
 
 
@@ -457,7 +501,9 @@ def ke_csv(df_sumber, kolom_lengkap, kolom_ringkas, batas):
     return data.encode("utf-8"), True
 
 
-def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom_depan):
+def buat_excel(
+    out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom_depan
+):
     """Laporan Excel multi-sheet. Mengembalikan bytes, atau None jika gagal."""
     if not ADA_XLSX:
         return None
@@ -468,7 +514,9 @@ def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom
             f_judul = wb.add_format(
                 {"bold": True, "font_size": 16, "font_color": "#1e3799"}
             )
-            f_label = wb.add_format({"bold": True, "bg_color": "#dfe6e9", "border": 1})
+            f_label = wb.add_format(
+                {"bold": True, "bg_color": "#dfe6e9", "border": 1}
+            )
             f_nilai = wb.add_format({"border": 1})
             f_head = wb.add_format(
                 {
@@ -496,7 +544,10 @@ def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom
             )
             info = [
                 ("Sumber data", str(nama)),
-                ("Tanggal analisis", datetime.now(WIB).strftime("%d-%m-%Y %H:%M WIB")),
+                (
+                    "Tanggal analisis",
+                    datetime.now(WIB).strftime("%d-%m-%Y %H:%M WIB"),
+                ),
                 ("Model", "Random Forest (dataset CICIDS2017)"),
                 ("Total data dianalisis", int(total)),
                 ("Trafik normal", int(total - n_serangan)),
@@ -512,7 +563,10 @@ def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom
             ]
             if evaluasi is not None:
                 info.append(
-                    ("Akurasi pada data ini (%)", round(evaluasi["akurasi"] * 100, 2))
+                    (
+                        "Akurasi pada data ini (%)",
+                        round(evaluasi["akurasi"] * 100, 2),
+                    )
                 )
             for i, (k, v) in enumerate(info):
                 ws.write(3 + i, 0, k, f_label)
@@ -525,12 +579,16 @@ def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom
             for i, (kat, jml) in enumerate(counts.items()):
                 ws.write(r0 + 1 + i, 0, str(kat), f_nilai)
                 ws.write(r0 + 1 + i, 1, int(jml), f_nilai)
-                ws.write(r0 + 1 + i, 2, round(int(jml) / total * 100, 3), f_nilai)
+                ws.write(
+                    r0 + 1 + i, 2, round(int(jml) / total * 100, 3), f_nilai
+                )
 
             serangan = counts.drop(NORMAL, errors="ignore")
             if len(serangan) > 0:
                 r1 = r0 + len(counts) + 4
-                ws.write(r1 - 1, 0, "Distribusi jenis serangan (tanpa Normal)", f_label)
+                ws.write(
+                    r1 - 1, 0, "Distribusi jenis serangan (tanpa Normal)", f_label
+                )
                 for j, h in enumerate(["Jenis serangan", "Jumlah"]):
                     ws.write(r1, j, h, f_head)
                 for i, (kat, jml) in enumerate(serangan.items()):
@@ -540,8 +598,20 @@ def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom
                 chart.add_series(
                     {
                         "name": "Jumlah serangan",
-                        "categories": ["Ringkasan", r1 + 1, 0, r1 + len(serangan), 0],
-                        "values": ["Ringkasan", r1 + 1, 1, r1 + len(serangan), 1],
+                        "categories": [
+                            "Ringkasan",
+                            r1 + 1,
+                            0,
+                            r1 + len(serangan),
+                            0,
+                        ],
+                        "values": [
+                            "Ringkasan",
+                            r1 + 1,
+                            1,
+                            r1 + len(serangan),
+                            1,
+                        ],
                         "data_labels": {"value": True},
                         "fill": {"color": "#ff4757"},
                     }
@@ -563,14 +633,20 @@ def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom
                 ]
                 if c in out.columns
             ]
-            det = out.loc[mask, kolom_depan + opsional].head(MAX_BARIS_EXCEL).copy()
+            det = (
+                out.loc[mask, kolom_depan + opsional]
+                .head(MAX_BARIS_EXCEL)
+                .copy()
+            )
             for c in ["Hasil_Prediksi", "Label_Asli"]:
                 if c in det.columns:
                     det[c] = det[c].astype(str)
             det["Perlu_Ditinjau"] = np.where(det["Perlu_Ditinjau"], "Ya", "Tidak")
             for c in opsional:
                 det[c] = det[c].astype("float64").round(4)
-            det.to_excel(writer, sheet_name="Detail_Serangan", index_label="no_baris")
+            det.to_excel(
+                writer, sheet_name="Detail_Serangan", index_label="no_baris"
+            )
             ws2 = writer.sheets["Detail_Serangan"]
             ws2.freeze_panes(1, 0)
             ws2.autofilter(0, 0, len(det), len(det.columns))
@@ -603,10 +679,55 @@ def buat_excel(out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom
 
 
 # ============================================================================
-# PROSES ANALISIS
+# FUNGSI BANTU: DATABASE PENGIRIMAN CLOUD (SQL & NoSQL)
 # ============================================================================
+def kirim_ke_supabase(df_hasil):
+    """Kirim log prediksi ke PostgreSQL Supabase (SQL)"""
+    if supabase_client is None:
+        st.warning(
+            "Supabase belum terhubung: cek Secrets (SUPABASE_URL dan SUPABASE_KEY)."
+        )
+        return
+    try:
+        data_to_push = []
+        # Ambil sampel 1.000 baris pertama untuk di-push ke database SQL Cloud
+        df_sample = df_hasil.head(1000)
+        for idx, row in df_sample.iterrows():
+            data_to_push.append(
+                {
+                    "no_baris": int(idx + 1),
+                    "Hasil_Prediksi": str(row["Hasil_Prediksi"]),
+                    "Keyakinan_Persen": float(row["Keyakinan_%"]),
+                    "Perlu_Ditinjau": bool(row["Perlu_Ditinjau"]),
+                }
+            )
+        supabase_client.table("log_serangan").insert(data_to_push).execute()
+        st.toast("✅ Log berhasil dikirim ke Supabase (SQL)!")
+    except Exception as e:
+        st.warning(f"Koneksi Supabase: {e}")
+
+
+def kirim_ke_firebase(counts, total, n_serangan, n_ditinjau):
+    """Kirim ringkasan real-time ke Firebase (NoSQL)"""
+    if not firebase_ok:
+        return
+    try:
+        ref = db.reference("nids_summary")
+        summary_data = {
+            "waktu_analisis": datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S"),
+            "total_data": int(total),
+            "total_serangan": int(n_serangan),
+            "perlu_ditinjau": int(n_ditinjau),
+            "distribusi_kategori": counts.to_dict(),
+        }
+        ref.set(summary_data)
+        st.toast("⚡ Summary berhasil di-push ke Firebase Realtime DB (NoSQL)!")
+    except Exception as e:
+        st.warning(f"Koneksi Firebase: {e}")
+
+
 # ============================================================================
-# FUNGSI BANTU: DATABASE SQL (SQLite)
+# FUNGSI BANTU: DATABASE SQL (SQLite Lokal)
 # ============================================================================
 KOLOM_HASIL = ["Hasil_Prediksi", "Keyakinan_%", "Perlu_Ditinjau", "Label_Asli"]
 
@@ -618,7 +739,8 @@ CONTOH_KUERI = {
     "Rata-rata keyakinan per kategori": (
         "SELECT Hasil_Prediksi AS kategori,\n"
         "       ROUND(AVG(Keyakinan_persen), 2) AS rata_rata_keyakinan\n"
-        "FROM hasil_prediksi\nGROUP BY Hasil_Prediksi\nORDER BY rata_rata_keyakinan"
+        "FROM hasil_prediksi\nGROUP BY Hasil_Prediksi\nORDER BY"
+        " rata_rata_keyakinan"
     ),
     "Serangan dengan keyakinan rendah": (
         "SELECT no_baris, Hasil_Prediksi, Keyakinan_persen\n"
@@ -641,16 +763,14 @@ def _nama_sql_unik(daftar):
     terpakai, hasil = {}, []
     for nama in map(_nama_sql, daftar):
         terpakai[nama] = terpakai.get(nama, 0) + 1
-        hasil.append(nama if terpakai[nama] == 1 else f"{nama}_{terpakai[nama]}")
+        hasil.append(
+            nama if terpakai[nama] == 1 else f"{nama}_{terpakai[nama]}"
+        )
     return hasil
 
 
 def buat_database_sql(h):
-    """Bangun database SQLite dari hasil analisis.
-
-    Mengembalikan dict berisi path file .db, bytes .db, teks dump .sql (atau None)
-    dan jumlah baris tabel utama.
-    """
+    """Bangun database SQLite dari hasil analisis."""
     out = h["out"]
     if len(out) <= MAX_SQL_LENGKAP:
         kolom = [k for k in h["kolom_urut"] if k in out.columns]
@@ -689,7 +809,11 @@ def buat_database_sql(h):
     conn = sqlite3.connect(path)
     try:
         df.to_sql(
-            "hasil_prediksi", conn, index=True, index_label="no_baris", chunksize=50_000
+            "hasil_prediksi",
+            conn,
+            index=True,
+            index_label="no_baris",
+            chunksize=50_000,
         )
         ringkasan.to_sql("ringkasan_kategori", conn, index=False)
         info.to_sql("info_analisis", conn, index=False)
@@ -721,7 +845,9 @@ def jalankan_kueri(path, sql):
     """Jalankan satu kueri baca-saja. Mengembalikan (DataFrame, terpotong)."""
     teks = sql.strip().rstrip(";").strip()
     if not teks.lower().startswith(("select", "with")):
-        raise ValueError("Hanya kueri SELECT (atau WITH ... SELECT) yang diizinkan.")
+        raise ValueError(
+            "Hanya kueri SELECT (atau WITH ... SELECT) yang diizinkan."
+        )
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         conn.execute("PRAGMA query_only = ON")
@@ -734,8 +860,11 @@ def jalankan_kueri(path, sql):
     return pd.DataFrame(baris[:MAX_BARIS_KUERI], columns=kolom), terpotong
 
 
+# ============================================================================
+# PROSES ANALISIS
+# ============================================================================
 def analisis(sumber, nama):
-    """Baca file SEKALI, prediksi, lalu simpan semua hasil ke session_state."""
+    """Baca file SEKALI, prediksi, simpan ke database, dan simpan hasil ke session_state."""
     st.session_state.pop("hasil", None)
     gc.collect()
 
@@ -827,8 +956,10 @@ def analisis(sumber, nama):
             "cm": cm,
         }
 
-    # Laporan (dibuat sekali, bukan di setiap rerun)
-    csv_utama, ringkas = ke_csv(out, kolom_urut, kolom_depan, MAX_LAPORAN_LENGKAP)
+    # Laporan
+    csv_utama, ringkas = ke_csv(
+        out, kolom_urut, kolom_depan, MAX_LAPORAN_LENGKAP
+    )
     if ringkas:
         csv_label, csv_nama = "⬇️ Hasil Prediksi (.CSV)", "hasil_prediksi_nids.csv"
     else:
@@ -842,7 +973,11 @@ def analisis(sumber, nama):
         out, counts, total, n_serangan, n_ditinjau, nama, evaluasi, kolom_depan
     )
 
-    st.session_state.pop("sql", None)  # database SQL dibuat ulang untuk data baru
+    # === OTOMATIS SIMPAN KE SUPABASE (SQL) & FIREBASE (NoSQL) ===
+    kirim_ke_supabase(out)
+    kirim_ke_firebase(counts, total, n_serangan, n_ditinjau)
+
+    st.session_state.pop("sql", None)
     st.session_state["hasil"] = {
         "out": out,
         "nama": nama,
@@ -878,7 +1013,9 @@ uploaded_file = st.sidebar.file_uploader(
 )
 klik_unggah = False
 if uploaded_file is not None:
-    klik_unggah = st.sidebar.button("🚀 Jalankan Analisis & Deteksi", type="primary")
+    klik_unggah = st.sidebar.button(
+        "🚀 Jalankan Analisis & Deteksi", type="primary"
+    )
 
 klik_contoh = False
 if os.path.exists(CONTOH_PATH):
@@ -925,14 +1062,14 @@ with tab_hasil:
         st.markdown(
             '<div class="langkah-wrap">'
             '<div class="langkah"><div class="no">1</div><b>Upload data</b>'
-            "<span>Pilih file CSV trafik jaringan (fitur CICIDS2017) lewat panel di kiri,"
-            " atau pakai data contoh.</span></div>"
+            "<span>Pilih file CSV trafik jaringan (fitur CICIDS2017) lewat panel"
+            " di kiri, atau pakai data contoh.</span></div>"
             '<div class="langkah"><div class="no">2</div><b>Jalankan analisis</b>'
-            "<span>Model Random Forest mengklasifikasikan tiap baris menjadi trafik normal"
-            " atau jenis serangan tertentu.</span></div>"
-            '<div class="langkah"><div class="no">3</div><b>Lihat dan unduh hasil</b>'
-            "<span>Pantau ringkasan risiko, grafik, evaluasi, lalu unduh laporan Excel atau"
-            " CSV.</span></div></div>",
+            "<span>Model Random Forest mengklasifikasikan tiap baris menjadi"
+            " trafik normal atau jenis serangan tertentu.</span></div>"
+            '<div class="langkah"><div class="no">3</div><b>Lihat dan unduh'
+            " hasil</b><span>Pantau ringkasan risiko, grafik, evaluasi, lalu"
+            " unduh laporan Excel atau CSV.</span></div></div>",
             unsafe_allow_html=True,
         )
         st.info(
@@ -949,12 +1086,20 @@ with tab_hasil:
         kolom_urut = hasil["kolom_urut"]
         persen_serangan = (n_serangan / total) * 100 if total > 0 else 0
 
-        st.caption(f"Sumber data: **{hasil['nama']}** · dianalisis {hasil['waktu']}")
+        st.caption(
+            f"Sumber data: **{hasil['nama']}** · dianalisis {hasil['waktu']}"
+        )
         st.markdown(meter_risiko(persen_serangan), unsafe_allow_html=True)
 
         c1, c2, c3, c4 = st.columns(4)
         c1.markdown(
-            kartu("📁", "Total data dianalisis", fmt_id(total), "netral", "baris trafik"),
+            kartu(
+                "📁",
+                "Total data dianalisis",
+                fmt_id(total),
+                "netral",
+                "baris trafik",
+            ),
             unsafe_allow_html=True,
         )
         c2.markdown(
@@ -995,7 +1140,8 @@ with tab_hasil:
                 insight(
                     "🔎",
                     "Serangan terbanyak",
-                    f"{wawasan['jenis']} · {fmt_id(wawasan['jenis_jumlah'])} baris ({pj:.2f}%)",
+                    f"{wawasan['jenis']} · {fmt_id(wawasan['jenis_jumlah'])} baris"
+                    f" ({pj:.2f}%)",
                 ),
                 unsafe_allow_html=True,
             )
@@ -1013,13 +1159,18 @@ with tab_hasil:
             g1, g2 = st.columns([2, 3])
             with g1:
                 st.markdown("**Komposisi trafik**")
-                tampil(grafik_donat(total - n_serangan, n_serangan), stretch=False)
+                tampil(
+                    grafik_donat(total - n_serangan, n_serangan), stretch=False
+                )
                 st.caption("🟢 Normal  ·  🔴 Serangan")
             with g2:
                 serangan_saja = counts.drop(NORMAL, errors="ignore")
                 if len(serangan_saja) > 0:
                     tampil(
-                        grafik_batang(serangan_saja, "Jenis serangan terdeteksi (tanpa Normal)")
+                        grafik_batang(
+                            serangan_saja,
+                            "Jenis serangan terdeteksi (tanpa Normal)",
+                        )
                     )
                 else:
                     st.success("Tidak ada serangan terdeteksi pada data ini.")
@@ -1028,9 +1179,15 @@ with tab_hasil:
         with st.container(border=True, key="panel_rekap"):
             r1, r2 = st.columns([3, 2])
             with r1:
-                tampil(grafik_batang(counts, "Jumlah baris per kategori", horizontal=True))
+                tampil(
+                    grafik_batang(
+                        counts, "Jumlah baris per kategori", horizontal=True
+                    )
+                )
             with r2:
-                rekap = counts.rename_axis("Kategori").reset_index(name="Jumlah")
+                rekap = counts.rename_axis("Kategori").reset_index(
+                    name="Jumlah"
+                )
                 rekap["Persen (%)"] = (rekap["Jumlah"] / total * 100).round(3)
                 st.dataframe(rekap, hide_index=True, width="stretch")
 
@@ -1041,7 +1198,9 @@ with tab_hasil:
                 pilihan = st.selectbox(
                     "Pilih kategori trafik yang ingin ditampilkan:",
                     ["Semua Kategori"]
-                    + sorted(str(x) for x in out["Hasil_Prediksi"].cat.categories),
+                    + sorted(
+                        str(x) for x in out["Hasil_Prediksi"].cat.categories
+                    ),
                 )
             with f2:
                 st.write("")
@@ -1057,7 +1216,8 @@ with tab_hasil:
 
             st.dataframe(df_f.head(100)[kolom_urut], width="stretch")
             st.caption(
-                f"Menampilkan 100 baris pertama dari {len(df_f):,} baris yang sesuai filter."
+                f"Menampilkan 100 baris pertama dari {len(df_f):,} baris yang"
+                " sesuai filter."
             )
 
 # ------------------------------------------------------------- Evaluasi Langsung
@@ -1067,9 +1227,9 @@ with tab_eval:
         st.info("Belum ada hasil analisis. Jalankan analisis terlebih dahulu.")
     elif hasil["evaluasi"] is None:
         st.info(
-            "File ini tidak memiliki kolom **Attack Type**, sehingga evaluasi langsung"
-            " tidak dapat dihitung. Upload file yang masih berlabel (atau pakai data"
-            " contoh) untuk mengaktifkan fitur ini."
+            "File ini tidak memiliki kolom **Attack Type**, sehingga evaluasi"
+            " langsung tidak dapat dihitung. Upload file yang masih berlabel"
+            " (atau pakai data contoh) untuk mengaktifkan fitur ini."
         )
     else:
         ev = hasil["evaluasi"]
@@ -1078,28 +1238,88 @@ with tab_eval:
             macro = float(ev["tabel"].loc["macro avg", "F1-score"])
         except Exception:
             macro = float("nan")
-        e1.markdown(kartu("🎯", "Akurasi pada file ini", f"{ev['akurasi'] * 100:.2f}%".replace(".", ","), "netral", "dihitung dari label asli"), unsafe_allow_html=True)
-        e2.markdown(kartu("📐", "Macro F1-score", f"{macro:.3f}".replace(".", ","), "netral", "rata-rata antar kelas"), unsafe_allow_html=True)
-        e3.markdown(kartu("🗃️", "Total baris dievaluasi", fmt_id(total), "netral", "baris berlabel"), unsafe_allow_html=True)
+        e1.markdown(
+            kartu(
+                "🎯",
+                "Akurasi pada file ini",
+                f"{ev['akurasi'] * 100:.2f}%".replace(".", ","),
+                "netral",
+                "dihitung dari label asli",
+            ),
+            unsafe_allow_html=True,
+        )
+        e2.markdown(
+            kartu(
+                "📐",
+                "Macro F1-score",
+                f"{macro:.3f}".replace(".", ","),
+                "netral",
+                "rata-rata antar kelas",
+            ),
+            unsafe_allow_html=True,
+        )
+        e3.markdown(
+            kartu(
+                "🗃️",
+                "Total baris dievaluasi",
+                fmt_id(total),
+                "netral",
+                "baris berlabel",
+            ),
+            unsafe_allow_html=True,
+        )
         st.write("")
         st.markdown("**Presisi, recall, dan F1-score per kelas**")
         st.dataframe(ev["tabel"].round(3), width="stretch")
-        st.markdown("**Confusion matrix** (baris = label asli, kolom = prediksi model)")
+        st.markdown(
+            "**Confusion matrix** (baris = label asli, kolom = prediksi model)"
+        )
         tampil(grafik_cm(ev["cm"]))
         st.caption(
-            "Catatan: sebagian baris mungkin sudah dipakai saat pelatihan, sehingga"
-            " angka ini bersifat demonstrasi. Bukti akurasi utama ada di tab"
-            " **Performa Model** (data uji 20% yang tidak dipakai melatih)."
+            "Catatan: sebagian baris mungkin sudah dipakai saat pelatihan,"
+            " sehingga angka ini bersifat demonstrasi. Bukti akurasi utama ada"
+            " di tab **Performa Model** (data uji 20% yang tidak dipakai"
+            " melatih)."
         )
 
 # ---------------------------------------------------------------- Performa Model
 with tab_model:
     st.subheader("🧠 Performa Model pada Data Uji")
     m1, m2, m3, m4 = st.columns(4)
-    m1.markdown(kartu("🎯", "Akurasi", "99,87%", "normal", "pada data uji"), unsafe_allow_html=True)
-    m2.markdown(kartu("📐", "Macro F1-score", "0,94", "netral", "rata-rata antar kelas"), unsafe_allow_html=True)
-    m3.markdown(kartu("🗃️", "Total data latih + uji", "2.520.751", "netral", "baris"), unsafe_allow_html=True)
-    m4.markdown(kartu("🧪", "Data uji (20%)", "504.151", "netral", "tidak dipakai melatih"), unsafe_allow_html=True)
+    m1.markdown(
+        kartu("🎯", "Akurasi", "99,87%", "normal", "pada data uji"),
+        unsafe_allow_html=True,
+    )
+    m2.markdown(
+        kartu(
+            "📐",
+            "Macro F1-score",
+            "0,94",
+            "netral",
+            "rata-rata antar kelas",
+        ),
+        unsafe_allow_html=True,
+    )
+    m3.markdown(
+        kartu(
+            "🗃️",
+            "Total data latih + uji",
+            "2.520.751",
+            "netral",
+            "baris",
+        ),
+        unsafe_allow_html=True,
+    )
+    m4.markdown(
+        kartu(
+            "🧪",
+            "Data uji (20%)",
+            "504.151",
+            "netral",
+            "tidak dipakai melatih",
+        ),
+        unsafe_allow_html=True,
+    )
     st.write("")
 
     t1, t2 = st.columns([3, 2])
@@ -1118,10 +1338,11 @@ with tab_model:
         tampil(grafik_f1())
 
     st.warning(
-        "⚠️ Kelas **Bots** paling sulit dikenali (recall 0,47) karena sangat sedikit:"
-        " hanya 1.948 baris (sekitar 0,08%) dari seluruh data. Akurasi keseluruhan"
-        " tinggi terutama karena Normal Traffic mendominasi (sekitar 83%), sehingga"
-        " F1-score per kelas lebih jujur untuk menilai model."
+        "⚠️ Kelas **Bots** paling sulit dikenali (recall 0,47) karena sangat"
+        " sedikit: hanya 1.948 baris (sekitar 0,08%) dari seluruh data. Akurasi"
+        " keseluruhan tinggi terutama karena Normal Traffic mendominasi"
+        " (sekitar 83%), sehingga F1-score per kelas lebih jujur untuk menilai"
+        " model."
     )
 
     st.markdown("---")
@@ -1132,7 +1353,9 @@ with tab_model:
         and hasattr(model, "feature_names_in_")
     ):
         fi = (
-            pd.Series(model.feature_importances_, index=model.feature_names_in_)
+            pd.Series(
+                model.feature_importances_, index=model.feature_names_in_
+            )
             .sort_values(ascending=False)
             .head(10)
         )
@@ -1154,7 +1377,10 @@ with tab_laporan:
         with d1:
             with st.container(border=True, key="panel_dl_csv"):
                 st.markdown("#### 📄 Data + Prediksi")
-                st.caption("Seluruh data beserta kolom prediksi, keyakinan, dan penanda tinjau.")
+                st.caption(
+                    "Seluruh data beserta kolom prediksi, keyakinan, dan"
+                    " penanda tinjau."
+                )
                 st.download_button(
                     hasil["csv_label"],
                     data=hasil["csv_utama"],
@@ -1166,7 +1392,10 @@ with tab_laporan:
         with d2:
             with st.container(border=True, key="panel_dl_xlsx"):
                 st.markdown("#### 📗 Laporan Excel")
-                st.caption("Ringkasan bergrafik, detail serangan, dan evaluasi (jika berlabel).")
+                st.caption(
+                    "Ringkasan bergrafik, detail serangan, dan evaluasi (jika"
+                    " berlabel)."
+                )
                 if hasil["excel"] is not None:
                     st.download_button(
                         "Unduh laporan (.xlsx)",
@@ -1181,7 +1410,10 @@ with tab_laporan:
         with d3:
             with st.container(border=True, key="panel_dl_serangan"):
                 st.markdown("#### 🚨 Daftar Serangan")
-                st.caption("Hanya baris yang diprediksi sebagai serangan, siap ditindaklanjuti.")
+                st.caption(
+                    "Hanya baris yang diprediksi sebagai serangan, siap"
+                    " ditindaklanjuti."
+                )
                 st.download_button(
                     "Unduh daftar serangan (.csv)",
                     data=hasil["csv_serangan"],
@@ -1192,27 +1424,34 @@ with tab_laporan:
                 )
         if hasil["ringkas"]:
             st.caption(
-                f"Data lebih dari {MAX_LAPORAN_LENGKAP:,} baris, sehingga file CSV"
-                " hanya berisi kolom hasil (prediksi, keyakinan, dan penanda tinjau)."
+                f"Data lebih dari {MAX_LAPORAN_LENGKAP:,} baris, sehingga file"
+                " CSV hanya berisi kolom hasil (prediksi, keyakinan, dan"
+                " penanda tinjau)."
             )
         st.caption(
-            "Laporan Excel berisi sheet Ringkasan (dengan grafik), Detail_Serangan,"
-            " dan, jika file berlabel, sheet Evaluasi serta Confusion_Matrix."
+            "Laporan Excel berisi sheet Ringkasan (dengan grafik),"
+            " Detail_Serangan, dan, jika file berlabel, sheet Evaluasi serta"
+            " Confusion_Matrix."
         )
 
 
 # ------------------------------------------------------------------ Database SQL
 with tab_sql:
-    st.subheader("🗄️ Database SQL")
+    st.subheader("🗄️ Database SQL (Lokal & Cloud)")
     if hasil is None:
         st.info("Belum ada hasil analisis. Jalankan analisis terlebih dahulu.")
     else:
         st.caption(
-            "Simpan hasil prediksi sebagai database SQLite (.db) atau skrip SQL (.sql),"
-            " atau langsung jalankan kueri SQL di sini."
+            "Simpan hasil prediksi sebagai database SQLite (.db) lokal, atau"
+            " jalankan kueri SQL langsung. Hasil analisis juga otomatis"
+            " tersimpan ke database SQL Cloud Supabase."
         )
         if "sql" not in st.session_state:
-            if st.button("🛠️ Buat database SQL dari hasil ini", type="primary", key="btn_sql"):
+            if st.button(
+                "🛠️ Buat database SQL dari hasil ini",
+                type="primary",
+                key="btn_sql",
+            ):
                 with st.spinner("Membuat database..."):
                     st.session_state["sql"] = buat_database_sql(hasil)
                 st.rerun()
@@ -1238,7 +1477,10 @@ with tab_sql:
             with q2:
                 with st.container(border=True, key="panel_dl_sqlscript"):
                     st.markdown("#### 📜 Skrip SQL (.sql)")
-                    st.caption("Berisi CREATE TABLE + INSERT, bisa diimpor ke MySQL/PostgreSQL.")
+                    st.caption(
+                        "Berisi CREATE TABLE + INSERT, bisa diimpor ke"
+                        " MySQL/PostgreSQL."
+                    )
                     if sql_state["dump"] is not None:
                         st.download_button(
                             "Unduh skrip (.sql)",
@@ -1250,22 +1492,25 @@ with tab_sql:
                         )
                     else:
                         st.caption(
-                            f"Tidak tersedia: data lebih dari {MAX_SQL_DUMP:,} baris."
-                            " Gunakan file .db."
+                            f"Tidak tersedia: data lebih dari {MAX_SQL_DUMP:,}"
+                            " baris. Gunakan file .db."
                         )
             if not sql_state["lengkap"]:
                 st.caption(
-                    f"Data lebih dari {MAX_SQL_LENGKAP:,} baris, sehingga tabel"
-                    " hasil_prediksi hanya berisi kolom hasil (prediksi, keyakinan,"
-                    " penanda tinjau, label asli)."
+                    f"Data lebih dari {MAX_SQL_LENGKAP:,} baris, sehingga"
+                    " tabel hasil_prediksi hanya berisi kolom hasil (prediksi,"
+                    " keyakinan, penanda tinjau, label asli)."
                 )
             st.markdown(
-                "**Tabel:** `hasil_prediksi`, `ringkasan_kategori`, `info_analisis`"
+                "**Tabel:** `hasil_prediksi`, `ringkasan_kategori`,"
+                " `info_analisis`"
                 + (", `evaluasi_kelas`" if hasil["evaluasi"] else "")
             )
 
             st.markdown("##### ▶️ Jalankan kueri SQL")
-            pilihan = st.selectbox("Contoh kueri", list(CONTOH_KUERI), key="contoh_kueri")
+            pilihan = st.selectbox(
+                "Contoh kueri", list(CONTOH_KUERI), key="contoh_kueri"
+            )
             teks_sql = st.text_area(
                 "Kueri (hanya SELECT)",
                 value=CONTOH_KUERI[pilihan],
@@ -1274,12 +1519,18 @@ with tab_sql:
             )
             if st.button("Jalankan", key="btn_jalankan_sql"):
                 try:
-                    df_kueri, terpotong = jalankan_kueri(sql_state["path"], teks_sql)
+                    df_kueri, terpotong = jalankan_kueri(
+                        sql_state["path"], teks_sql
+                    )
                 except Exception as e:
                     st.error(f"Kueri gagal: {e}")
                 else:
                     st.dataframe(df_kueri, hide_index=True, width="stretch")
                     st.caption(
                         f"{len(df_kueri):,} baris ditampilkan"
-                        + (f" (dibatasi {MAX_BARIS_KUERI:,} baris pertama)." if terpotong else ".")
+                        + (
+                            f" (dibatasi {MAX_BARIS_KUERI:,} baris pertama)."
+                            if terpotong
+                            else "."
+                        )
                     )
