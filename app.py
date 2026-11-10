@@ -1,5 +1,6 @@
 import gc
 import io
+import json
 import os
 import re
 import sqlite3
@@ -13,11 +14,16 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics import accuracy_score, classification_report
 
-# --- INTEGRASI DATABASE CLOUD (Supabase / PostgreSQL) ---
+# --- INTEGRASI DATABASE CLOUD: SQL (Supabase) dan NoSQL (Firebase RTDB) ---
 try:
     from supabase import create_client
 except Exception:
     create_client = None
+try:
+    import firebase_admin
+    from firebase_admin import credentials, db
+except Exception:
+    firebase_admin = None
 try:
     import xlsxwriter  # noqa: F401
 
@@ -86,6 +92,28 @@ try:
 except Exception as e:
     supabase_client = None
     supabase_galat = f"{type(e).__name__}: {e}"
+
+# 2. Firebase Realtime Database (NoSQL)
+firebase_ok = False
+firebase_galat = None
+try:
+    if firebase_admin is None:
+        raise RuntimeError("pustaka firebase-admin belum ada di requirements.txt")
+    if not firebase_admin._apps:
+        if "FIREBASE_JSON" in st.secrets:
+            info_kunci = json.loads(st.secrets["FIREBASE_JSON"])
+        elif "FIREBASE_CREDENTIALS" in st.secrets:
+            info_kunci = dict(st.secrets["FIREBASE_CREDENTIALS"])
+        else:
+            raise RuntimeError("FIREBASE_JSON belum diisi di Secrets")
+        firebase_admin.initialize_app(
+            credentials.Certificate(info_kunci),
+            {"databaseURL": st.secrets["FIREBASE_URL"]},
+        )
+    firebase_ok = True
+except Exception as e:
+    firebase_ok = False
+    firebase_galat = f"{type(e).__name__}: {e}"
 
 # ============================================================================
 # TAMPILAN
@@ -740,6 +768,93 @@ def baca_log(run_id, batas=100):
 
 
 # ============================================================================
+# FUNGSI BANTU: DATABASE NoSQL (Firebase Realtime Database)
+# ============================================================================
+# Struktur pohon JSON di Realtime Database:
+#   /analisis/<id_unik>        -> ringkasan satu analisis (dokumen fleksibel)
+#   /katalog_serangan/<kelas>  -> data menu "Info Serangan" yang ditampilkan app
+KATALOG_SERANGAN = {
+    "Normal Traffic": {
+        "tingkat": "Aman",
+        "deskripsi": "Lalu lintas jaringan yang wajar, seperti membuka web, email, dan transfer file sehari-hari.",
+        "saran": "Tetap dipantau dan gunakan sebagai pembanding (baseline) untuk mengenali perilaku yang tidak biasa.",
+    },
+    "DoS": {
+        "tingkat": "Tinggi",
+        "deskripsi": "Serangan membanjiri satu layanan dari satu sumber sampai tidak mampu melayani pengguna yang sah (contoh di CICIDS2017: Hulk, GoldenEye, Slowloris).",
+        "saran": "Batasi laju permintaan (rate limiting), blokir IP sumber, dan pasang firewall di depan layanan.",
+    },
+    "DDoS": {
+        "tingkat": "Kritis",
+        "deskripsi": "Serangan DoS yang dilancarkan dari banyak sumber sekaligus (biasanya botnet), sehingga sulit diblokir per alamat IP.",
+        "saran": "Gunakan layanan anti-DDoS atau CDN, filter di sisi hulu (ISP), dan siapkan kapasitas cadangan.",
+    },
+    "Port Scanning": {
+        "tingkat": "Sedang",
+        "deskripsi": "Pemindaian port untuk mencari layanan yang terbuka. Biasanya tahap pengintaian sebelum serangan yang lebih serius.",
+        "saran": "Tutup port yang tidak dipakai, aktifkan firewall dan alert IDS, serta batasi koneksi baru per sumber.",
+    },
+    "Brute Force": {
+        "tingkat": "Tinggi",
+        "deskripsi": "Percobaan login berulang untuk menebak kata sandi (contoh di CICIDS2017: FTP-Patator dan SSH-Patator).",
+        "saran": "Batasi percobaan login, pasang fail2ban, aktifkan autentikasi dua faktor, dan wajibkan kata sandi yang kuat.",
+    },
+    "Web Attacks": {
+        "tingkat": "Tinggi",
+        "deskripsi": "Serangan ke aplikasi web, seperti brute force login web, XSS, dan SQL injection.",
+        "saran": "Validasi input, gunakan parameterized query, pasang WAF, dan selalu perbarui aplikasi.",
+    },
+    "Bots": {
+        "tingkat": "Tinggi",
+        "deskripsi": "Perangkat yang terinfeksi malware dan dikendalikan penyerang (botnet), berkomunikasi dengan server komando.",
+        "saran": "Isolasi perangkat yang terinfeksi, blokir alamat server komando, jalankan antivirus/EDR, dan ganti kredensial.",
+    },
+}
+
+
+def simpan_ke_firebase(h, sql_run_id=None):
+    """Simpan ringkasan satu analisis sebagai dokumen JSON. Mengembalikan kunci uniknya."""
+    if not firebase_ok:
+        raise RuntimeError("Firebase belum terhubung.")
+    ev = h["evaluasi"]
+    data = {
+        "sumber_data": str(h["nama"]),
+        "waktu_analisis": h["waktu"],
+        "dibuat_utc": datetime.now(timezone.utc).isoformat(),
+        "total_baris": int(h["total"]),
+        "jumlah_serangan": int(h["n_serangan"]),
+        "perlu_ditinjau": int(h["n_ditinjau"]),
+        "distribusi": {str(k): int(v) for k, v in h["counts"].items()},
+    }
+    if ev:
+        data["akurasi"] = float(ev["akurasi"])
+    if sql_run_id is not None:
+        data["sql_run_id"] = int(sql_run_id)
+    return db.reference("analisis").push(data).key
+
+
+def baca_riwayat_firebase(batas=50):
+    snap = db.reference("analisis").order_by_key().limit_to_last(batas).get()
+    if not snap:
+        return pd.DataFrame()
+    baris = []
+    for kunci, nilai in snap.items():
+        d = dict(nilai)
+        d["kunci"] = kunci
+        baris.append(d)
+    df = pd.DataFrame(baris).sort_values("kunci", ascending=False)
+    return df.reset_index(drop=True)
+
+
+def baca_katalog():
+    return db.reference("katalog_serangan").get() or {}
+
+
+def isi_katalog():
+    db.reference("katalog_serangan").set(KATALOG_SERANGAN)
+
+
+# ============================================================================
 # FUNGSI BANTU: DATABASE SQL (SQLite Lokal)
 # ============================================================================
 KOLOM_HASIL = ["Hasil_Prediksi", "Keyakinan_%", "Perlu_Ditinjau", "Label_Asli"]
@@ -1019,9 +1134,17 @@ st.sidebar.info(
 )
 
 if supabase_client is None:
-    st.sidebar.warning(f"Supabase belum terhubung. Penyebab: {supabase_galat}")
+    st.sidebar.warning(
+        f"Supabase (SQL) belum terhubung. Penyebab: {supabase_galat}"
+    )
 else:
-    st.sidebar.success("Supabase terhubung")
+    st.sidebar.success("Supabase (SQL) terhubung")
+if not firebase_ok:
+    st.sidebar.warning(
+        f"Firebase (NoSQL) belum terhubung. Penyebab: {firebase_galat}"
+    )
+else:
+    st.sidebar.success("Firebase Realtime DB (NoSQL) terhubung")
 
 st.sidebar.header("📂 Sumber Data")
 uploaded_file = st.sidebar.file_uploader(
@@ -1062,14 +1185,15 @@ hasil = st.session_state.get("hasil")
 # ============================================================================
 # KONTEN UTAMA (TAB)
 # ============================================================================
-tab_hasil, tab_eval, tab_model, tab_laporan, tab_sql, tab_riwayat = st.tabs(
+tab_hasil, tab_eval, tab_model, tab_laporan, tab_sql, tab_riwayat, tab_info = st.tabs(
     [
         "📊 Hasil Analisis",
         "🎯 Evaluasi Langsung",
         "🧠 Performa Model",
         "📥 Laporan",
-        "🗄️ Database SQL",
+        "🗄️ Database",
         "🕘 Riwayat",
+        "📚 Info Serangan",
     ]
 )
 
@@ -1454,36 +1578,61 @@ with tab_laporan:
 
 # ------------------------------------------------------------------ Database SQL
 with tab_sql:
-    st.subheader("🗄️ Database SQL (Lokal & Cloud)")
-    st.markdown("#### ☁️ Simpan ke Supabase (PostgreSQL)")
-    if supabase_client is None:
-        st.info("Supabase belum terhubung. Lihat penyebabnya di status sidebar.")
+    st.subheader("🗄️ Database (SQL & NoSQL)")
+    st.markdown("#### ☁️ Simpan ke database (SQL dan NoSQL)")
+    if supabase_client is None and not firebase_ok:
+        st.info("Belum ada database yang terhubung. Lihat status di sidebar.")
     elif hasil is None:
         st.caption("Jalankan analisis dulu, lalu simpan hasilnya ke database di sini.")
     else:
-        tersimpan = st.session_state.get("run_tersimpan")
-        if tersimpan:
-            st.success(
-                f"Hasil ini sudah tersimpan sebagai **analisis #{tersimpan['id']}**"
-                f" ({tersimpan['n']:,} baris log). Lihat di tab Riwayat."
-            )
-        else:
-            st.caption(
-                "Menyimpan ringkasan analisis (nama file, waktu, jumlah, distribusi"
-                f" kategori) dan {MAX_LOG_SUPABASE:,} baris pertama sebagai log."
-            )
+        keadaan = st.session_state.setdefault("run_tersimpan", {"sql": None, "fb": None})
+        perlu_sql = supabase_client is not None and keadaan["sql"] is None
+        perlu_fb = firebase_ok and keadaan["fb"] is None
+        if perlu_sql or perlu_fb:
+            tujuan = []
+            if perlu_sql:
+                tujuan.append(
+                    f"**SQL (Supabase)**: ringkasan + {MAX_LOG_SUPABASE:,} baris pertama sebagai log"
+                )
+            if perlu_fb:
+                tujuan.append("**NoSQL (Firebase Realtime DB)**: ringkasan analisis")
+            st.caption("Akan disimpan ke: " + " · ".join(tujuan))
             if st.button(
-                "💾 Simpan hasil ini ke Supabase",
+                "💾 Simpan hasil ini ke database",
                 type="primary",
-                key="btn_simpan_supabase",
+                key="btn_simpan_db",
             ):
-                try:
-                    with st.spinner("Menyimpan ke Supabase..."):
-                        rid, n_log = simpan_ke_supabase(hasil)
-                    st.session_state["run_tersimpan"] = {"id": rid, "n": n_log}
+                galat = []
+                if perlu_sql:
+                    try:
+                        with st.spinner("Menyimpan ke Supabase (SQL)..."):
+                            rid, n_log = simpan_ke_supabase(hasil)
+                        keadaan["sql"] = {"id": rid, "n": n_log}
+                    except Exception as e:
+                        galat.append(f"SQL (Supabase): {e}")
+                if perlu_fb:
+                    try:
+                        with st.spinner("Menyimpan ke Firebase (NoSQL)..."):
+                            kunci = simpan_ke_firebase(
+                                hasil, keadaan["sql"]["id"] if keadaan["sql"] else None
+                            )
+                        keadaan["fb"] = {"kunci": kunci}
+                    except Exception as e:
+                        galat.append(f"NoSQL (Firebase): {e}")
+                if galat:
+                    for g in galat:
+                        st.error(f"Gagal menyimpan ke {g}")
+                else:
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Gagal menyimpan: {e}")
+        if keadaan["sql"]:
+            st.success(
+                f"SQL: tersimpan sebagai **analisis #{keadaan['sql']['id']}**"
+                f" ({keadaan['sql']['n']:,} baris log)."
+            )
+        if keadaan["fb"]:
+            st.success("NoSQL: ringkasan tersimpan di Firebase Realtime Database.")
+        if keadaan["sql"] or keadaan["fb"]:
+            st.caption("Lihat hasilnya di tab Riwayat.")
     st.divider()
     st.markdown("#### 💾 Ekspor file database (lokal)")
     if hasil is None:
@@ -1584,24 +1733,36 @@ with tab_sql:
 
 
 # ---------------------------------------------------------------------- Riwayat
+def _angka(x):
+    return 0 if pd.isna(x) else int(x)
+
+
 with tab_riwayat:
-    st.subheader("🕘 Riwayat Analisis (Supabase)")
-    if supabase_client is None:
-        st.info("Supabase belum terhubung. Lihat penyebabnya di status sidebar.")
+    st.subheader("🕘 Riwayat Analisis")
+    dari_fb = firebase_ok
+    if not firebase_ok and supabase_client is None:
+        st.info("Belum ada database yang terhubung. Lihat status di sidebar.")
     else:
+        st.caption(
+            "Sumber data: "
+            + (
+                "**Firebase Realtime Database (NoSQL)**"
+                if dari_fb
+                else "**Supabase (SQL)**"
+            )
+        )
         try:
-            riwayat = baca_riwayat()
+            riwayat = baca_riwayat_firebase() if dari_fb else baca_riwayat()
         except Exception as e:
             riwayat = None
             st.error(f"Gagal membaca riwayat: {e}")
         if riwayat is not None and riwayat.empty:
             st.info(
                 "Belum ada analisis yang tersimpan. Jalankan analisis, lalu klik"
-                " **Simpan hasil ini ke Supabase** di tab Database SQL."
+                " **Simpan hasil ini ke database** di tab Database."
             )
         elif riwayat is not None:
             nama_kol = {
-                "id": "ID",
                 "sumber_data": "Sumber data",
                 "waktu_analisis": "Waktu",
                 "total_baris": "Total baris",
@@ -1609,28 +1770,42 @@ with tab_riwayat:
                 "perlu_ditinjau": "Perlu ditinjau",
                 "akurasi": "Akurasi",
             }
+            if dari_fb:
+                nama_kol["sql_run_id"] = "ID di SQL"
+            else:
+                nama_kol = {"id": "ID", **nama_kol}
             kol = [c for c in nama_kol if c in riwayat.columns]
             tabel_r = riwayat[kol].rename(columns=nama_kol)
             if "Akurasi" in tabel_r.columns:
-                tabel_r["Akurasi"] = (tabel_r["Akurasi"] * 100).round(2)
+                tabel_r["Akurasi"] = tabel_r["Akurasi"].map(
+                    lambda v: "-" if pd.isna(v) else f"{v * 100:.2f}%".replace(".", ",")
+                )
+            fmt_angka = st.column_config.NumberColumn(format="localized")
             st.dataframe(
                 tabel_r,
                 hide_index=True,
                 width="stretch",
                 column_config={
-                    "Akurasi": st.column_config.NumberColumn(format="%.2f%%")
+                    "Total baris": fmt_angka,
+                    "Serangan": fmt_angka,
+                    "Perlu ditinjau": fmt_angka,
                 },
             )
-            pilih = st.selectbox(
+
+            def _label(i):
+                r = riwayat.iloc[i]
+                return f"{r.get('sumber_data', '-')} · {r.get('waktu_analisis', '-')}"
+
+            pilih_i = st.selectbox(
                 "Lihat detail analisis",
-                list(riwayat["id"]),
-                format_func=lambda i: f"#{i}",
+                list(range(len(riwayat))),
+                format_func=_label,
                 key="pilih_riwayat",
             )
-            baris = riwayat[riwayat["id"] == pilih].iloc[0]
-            jml = int(baris.get("total_baris") or 0)
-            ser = int(baris.get("jumlah_serangan") or 0)
-            tin = int(baris.get("perlu_ditinjau") or 0)
+            baris = riwayat.iloc[pilih_i]
+            jml = _angka(baris.get("total_baris"))
+            ser = _angka(baris.get("jumlah_serangan"))
+            tin = _angka(baris.get("perlu_ditinjau"))
             st.caption(
                 f"Sumber data: **{baris.get('sumber_data', '-')}** · dianalisis"
                 f" {baris.get('waktu_analisis', '-')}"
@@ -1662,15 +1837,70 @@ with tab_riwayat:
                     tampil(
                         grafik_batang(
                             seri,
-                            f"Analisis #{pilih}: jumlah baris per kategori",
+                            "Jumlah baris per kategori",
                             horizontal=True,
                         )
                     )
-            try:
-                log = baca_log(pilih)
-            except Exception as e:
-                log = None
-                st.error(f"Gagal membaca log: {e}")
-            if log is not None and not log.empty:
-                st.markdown("**Contoh baris log (100 pertama)**")
-                st.dataframe(log, hide_index=True, width="stretch")
+            id_sql = baris.get("sql_run_id") if dari_fb else baris.get("id")
+            if supabase_client is not None and id_sql is not None and not pd.isna(id_sql):
+                try:
+                    log = baca_log(int(id_sql))
+                except Exception as e:
+                    log = None
+                    st.error(f"Gagal membaca log SQL: {e}")
+                if log is not None and not log.empty:
+                    st.markdown("**Contoh baris log dari database SQL (100 pertama)**")
+                    st.dataframe(log, hide_index=True, width="stretch")
+
+
+# --------------------------------------------------------------- Info Serangan
+with tab_info:
+    st.subheader("📚 Info Jenis Serangan")
+    if not firebase_ok:
+        st.info(
+            "Data halaman ini dibaca dari Firebase Realtime Database (NoSQL)."
+            " Hubungkan Firebase dulu, lihat status di sidebar."
+        )
+    else:
+        try:
+            katalog = baca_katalog()
+        except Exception as e:
+            katalog = None
+            st.error(f"Gagal membaca data dari Firebase: {e}")
+        if katalog is not None and not katalog:
+            st.info(
+                "Data katalog belum ada di Firebase. Klik tombol di bawah untuk"
+                " mengisinya (cukup sekali)."
+            )
+            if st.button("📥 Isi data katalog ke Firebase", key="btn_isi_katalog"):
+                try:
+                    isi_katalog()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal mengisi katalog: {e}")
+        elif katalog:
+            st.caption(
+                "Data di halaman ini dibaca langsung dari **Firebase Realtime"
+                " Database (NoSQL)**."
+            )
+            urutan = [k for k in WARNA if k in katalog] + sorted(
+                k for k in katalog if k not in WARNA
+            )
+            kelas_pill = {"Aman": "aman", "Sedang": "sedang"}
+            kiri, kanan = st.columns(2)
+            for n, kelas in enumerate(urutan):
+                item = katalog[kelas] or {}
+                tingkat = str(item.get("tingkat", "-"))
+                warna = WARNA.get(kelas, "#1e3799")
+                with (kiri if n % 2 == 0 else kanan):
+                    with st.container(border=True, key=f"panel_katalog_{n}"):
+                        st.markdown(
+                            f'<span style="display:inline-block;width:12px;height:12px;'
+                            f'border-radius:50%;background:{warna};margin-right:8px"></span>'
+                            f"<b style='font-size:1.1rem'>{kelas}</b> "
+                            f'<span class="pill {kelas_pill.get(tingkat, "kritis")}"'
+                            f' style="margin-left:8px">{tingkat.upper()}</span>',
+                            unsafe_allow_html=True,
+                        )
+                        st.write(item.get("deskripsi", ""))
+                        st.caption("🛡️ Saran: " + str(item.get("saran", "-")))
