@@ -99,17 +99,24 @@ firebase_galat = None
 try:
     if firebase_admin is None:
         raise RuntimeError("pustaka firebase-admin belum ada di requirements.txt")
-    if not firebase_admin._apps:
+    try:
+        firebase_admin.get_app()  # sudah pernah diinisialisasi (rerun Streamlit)
+    except ValueError:
         if "FIREBASE_JSON" in st.secrets:
             info_kunci = json.loads(st.secrets["FIREBASE_JSON"])
         elif "FIREBASE_CREDENTIALS" in st.secrets:
             info_kunci = dict(st.secrets["FIREBASE_CREDENTIALS"])
         else:
             raise RuntimeError("FIREBASE_JSON belum diisi di Secrets")
-        firebase_admin.initialize_app(
-            credentials.Certificate(info_kunci),
-            {"databaseURL": st.secrets["FIREBASE_URL"]},
-        )
+        try:
+            firebase_admin.initialize_app(
+                credentials.Certificate(info_kunci),
+                {"databaseURL": st.secrets["FIREBASE_URL"]},
+            )
+        except ValueError as e_init:
+            # aplikasi dibuat oleh sesi lain di saat yang sama: abaikan
+            if "already exists" not in str(e_init):
+                raise
     firebase_ok = True
 except Exception as e:
     firebase_ok = False
